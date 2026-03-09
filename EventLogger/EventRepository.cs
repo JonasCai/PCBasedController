@@ -74,48 +74,18 @@ namespace PCBasedController.EventLogger
         {
             while (batch.Count > 0 && !cancellationToken.IsCancellationRequested)
             {
+                int retryCount = 0;
                 try
                 {
                     var bulkOps = new List<WriteModel<EventBase>>();
-
-                    // 用于在当前批次内追踪刚触发的报警
-                    var pendingInserts = new Dictionary<Guid, AlarmModel>();
 
                     foreach (var evt in batch)
                     {
                         if (evt is AlarmModel alarm)
                         {
-                            if (alarm.State == AlarmState.Arrived)
-                            {
-                                // 到达事件：加入追踪字典，并准备 Insert
-                                pendingInserts[alarm.InstanceId] = alarm;
-                            }
-                            else if (alarm.State == AlarmState.Left)
-                            {
-                                // 离开事件：检查同批次中是否有它的“到达”事件
-                                if (pendingInserts.TryGetValue(alarm.InstanceId, out var arrivedAlarm))
-                                {
-                                    pendingInserts[alarm.InstanceId] = arrivedAlarm with
-                                    {
-                                        TimeCleared = alarm.TimeCleared,
-                                        State = AlarmState.Left
-                                    };
-                                }
-                                else
-                                {
-                                    // 3. 只有当到达事件在以前的批次早就入库了，才老老实实去数据库 Update
-                                    var filter = Builders<EventBase>.Filter.And(
-                                        Builders<EventBase>.Filter.OfType<AlarmModel>(a =>
-                                            a.InstanceId == alarm.InstanceId)
-                                    );
-
-                                    var update = Builders<EventBase>.Update
-                                        .Set(nameof(AlarmModel.State), AlarmState.Left)
-                                        .Set(nameof(AlarmModel.TimeCleared), alarm.TimeCleared);
-
-                                    bulkOps.Add(new UpdateOneModel<EventBase>(filter, update));
-                                }
-                            }
+                            // 无论是 Arrived 还是 Left，直接覆盖数据库中对应 InstanceId 的记录。
+                            var filter = Builders<EventBase>.Filter.Eq("_id", alarm.InstanceId);
+                            bulkOps.Add(new ReplaceOneModel<EventBase>(filter, alarm) { IsUpsert = true });
                         }
                         else
                         {
@@ -124,17 +94,31 @@ namespace PCBasedController.EventLogger
                         }
                     }
 
-                    foreach (var pendingInsert in pendingInserts.Values)
-                        bulkOps.Add(new InsertOneModel<EventBase>(pendingInsert));
-
                     if (bulkOps.Any())
+                    {
+                        // 使用 IsOrdered = false，即使某条记录冲突，也不会阻塞其他记录的写入
                         await _collection.BulkWriteAsync(bulkOps, new BulkWriteOptions { IsOrdered = false }, cancellationToken);
+                    }
 
                     batch.Clear();
                 }
+                catch (MongoBulkWriteException ex)
+                {
+                    // 如果是由于重复键引起的报错，通常意味着数据已经落盘，直接清空放弃重试，防止死循环
+                    _logger.LogError(ex, "MongoDB 批量写入发生文档级异常，将忽略冲突记录。");
+                    batch.Clear();
+                    break;
+                }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "MongoDB 写入失败。5秒后重试...");
+                    retryCount++;
+                    if (retryCount > 3)
+                    {
+                        _logger.LogCritical(ex, "MongoDB 写入连续失败超过3次，丢弃该批次日志以防内存溢出。");
+                        batch.Clear();
+                        break;
+                    }
+                    _logger.LogError(ex, $"MongoDB 网络或执行失败。5秒后进行第 {retryCount} 次重试...");
                     await Task.Delay(5000, cancellationToken);
                 }
             }
@@ -142,9 +126,19 @@ namespace PCBasedController.EventLogger
 
         public void Dispose()
         {
-            _bufferChannel.Writer.Complete();
-            _cts.CancelAfter(TimeSpan.FromSeconds(3)); // 给3秒收尾时间
-            try { _processTask.GetAwaiter().GetResult(); } catch { }
+            // 标记通道不再接收新数据
+            _bufferChannel.Writer.TryComplete();
+
+            //  给予后台任务最多 3 秒的时间把剩余数据写入 MongoDB
+            _cts.CancelAfter(TimeSpan.FromSeconds(3));
+
+            try
+            {
+                // 阻塞等待后台任务安全结束
+                _processTask.GetAwaiter().GetResult();
+            }
+            catch (TaskCanceledException) { }
+            catch (Exception ex) { _logger.LogError(ex, "事件仓储停机时发生异常"); }
             _cts.Dispose();
         }
     }

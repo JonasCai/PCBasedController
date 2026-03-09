@@ -38,7 +38,14 @@ namespace PCBasedController.EventLogger
             Task.Factory.StartNew(ProcessEventsLoop, TaskCreationOptions.LongRunning);
         }
 
-        public void Dispose() => _cts.Cancel();
+        public void Dispose()
+        {
+            // 阻止新事件进入
+            _incomingChannel.Writer.TryComplete();
+
+            // 给后台循环留出处理时间
+            _cts.CancelAfter(TimeSpan.FromSeconds(2));
+        }
 
         /// <summary>
         /// 获取当前活跃报警快照 (供 gRPC 客户端刚连上来时使用)
@@ -49,10 +56,24 @@ namespace PCBasedController.EventLogger
         // IEventProducer 实现
         // ==========================================
         public void RaiseAlarm(string sourceName, Guid instanceId, EventBase alarm, params object[] args)
-            => _incomingChannel.Writer.TryWrite(new RawEventEntry(instanceId, EventOpType.Raise, sourceName, alarm, args, DateTime.UtcNow));
+        {
+            var entry = new RawEventEntry(instanceId, EventOpType.Raise, sourceName, alarm, args, DateTime.UtcNow);
+            if (!_incomingChannel.Writer.TryWrite(entry))
+            {
+                // 严谨性补充：当事件洪峰导致队列溢出时，记录直接的本地错误，以便工程师回溯
+                _logger.LogCritical($"[日志溢出丢失] 无法记录报警到达: {instanceId} - {sourceName} - {alarm.MessageTemplate}");
+            }
+        }
+        
 
         public void ClearAlarm(string sourceName, Guid instanceId, EventBase alarm, params object[] args)
-            => _incomingChannel.Writer.TryWrite(new RawEventEntry(instanceId, EventOpType.Clear, sourceName, alarm, args, DateTime.UtcNow));
+        {
+            var entry = new RawEventEntry(instanceId, EventOpType.Clear, sourceName, alarm, args, DateTime.UtcNow);
+            if (!_incomingChannel.Writer.TryWrite(entry))
+            {
+                _logger.LogCritical($"[日志溢出丢失] 无法记录报警离开: {instanceId} - {sourceName} - {alarm.MessageTemplate}");
+            }
+        }
 
         public void SendInfo(string sourceName, EventBase info, params object[] args)
             => _incomingChannel.Writer.TryWrite(new RawEventEntry(Guid.NewGuid(), EventOpType.Info, sourceName, info, args, DateTime.UtcNow));
