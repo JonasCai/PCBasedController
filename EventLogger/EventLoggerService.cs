@@ -1,0 +1,176 @@
+﻿using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics.Eventing.Reader;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using System.Threading.Channels;
+using System.Threading.Tasks;
+
+namespace PCBasedController.EventLogger
+{
+    public class EventLoggerService : IEventProducer, IDisposable
+    {
+        private readonly Channel<RawEventEntry> _incomingChannel;
+        private readonly IEventRepository _repository;
+        private readonly ConcurrentDictionary<Guid, AlarmModel> _activeAlarms = new();
+        private readonly CancellationTokenSource _cts = new();
+        private readonly ILogger<EventLoggerService> _logger;
+
+        // 使用事件向外层(gRPC)广播，这样 EventLoggerService 不需要知道 gRPC 的存在
+        public event Action<EventBase>? OnEventProcessed;
+
+        public EventLoggerService(IEventRepository repository, ILogger<EventLoggerService> logger)
+        {
+            _logger = logger;
+            _repository = repository;
+
+            var options = new BoundedChannelOptions(10000)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.DropOldest
+            };
+            _incomingChannel = Channel.CreateBounded<RawEventEntry>(options);
+
+            // 启动后台处理循环
+            Task.Factory.StartNew(ProcessEventsLoop, TaskCreationOptions.LongRunning);
+        }
+
+        public void Dispose() => _cts.Cancel();
+
+        /// <summary>
+        /// 获取当前活跃报警快照 (供 gRPC 客户端刚连上来时使用)
+        /// </summary>
+        public IEnumerable<AlarmModel> GetActiveAlarmsSnapshot() => _activeAlarms.Values;
+
+        // ==========================================
+        // IEventProducer 实现
+        // ==========================================
+        public void RaiseAlarm(string sourceName, Guid instanceId, EventBase alarm, params object[] args)
+            => _incomingChannel.Writer.TryWrite(new RawEventEntry(instanceId, EventOpType.Raise, sourceName, alarm, args, DateTime.UtcNow));
+
+        public void ClearAlarm(string sourceName, Guid instanceId, EventBase alarm, params object[] args)
+            => _incomingChannel.Writer.TryWrite(new RawEventEntry(instanceId, EventOpType.Clear, sourceName, alarm, args, DateTime.UtcNow));
+
+        public void SendInfo(string sourceName, EventBase info, params object[] args)
+            => _incomingChannel.Writer.TryWrite(new RawEventEntry(Guid.NewGuid(), EventOpType.Info, sourceName, info, args, DateTime.UtcNow));
+
+
+        private async Task ProcessEventsLoop()
+        {
+            await foreach (var entry in _incomingChannel.Reader.ReadAllAsync(_cts.Token))
+            {
+                try
+                {
+                    EventBase? modelToProcess = entry.OpType switch
+                    {
+                        EventOpType.Raise => HandleRaise(entry),
+                        EventOpType.Clear => HandleClear(entry),
+                        EventOpType.Info => HandleInfo(entry),
+                        _ => null
+                    };
+
+                    if (modelToProcess != null)
+                    {
+                        // 异步存库 (EventRepository 自带 Channel 缓冲)
+                        _repository.Save(modelToProcess);
+
+                        // 广播给 UI (安全的委托调用机制)
+                        SafeBroadcast(modelToProcess);
+                    }
+                }
+                catch (OperationCanceledException) { /* 正常停机忽略 */ }
+                catch (Exception ex)
+                {
+                    _logger.LogCritical(ex, "事件处理核心循环发生致命异常！");
+                }
+            }
+        }
+
+        private MessageModel HandleInfo(RawEventEntry entry)
+        {
+            return new MessageModel
+            {
+                InstanceId = entry.instanceId,
+                EventId = entry.Event.EventId,
+                SourceName = entry.SourceName,
+                Severity = entry.Event.Severity,
+                MessageTemplate = entry.Event.MessageTemplate,
+                TimeRaised = entry.Timestamp,
+                Message = SafeFormat(entry.Event.MessageTemplate, entry.Args)
+            };
+        }
+
+        private AlarmModel? HandleRaise(RawEventEntry entry)
+        {
+            var key = entry.instanceId;
+
+            var model = new AlarmModel
+            {
+                InstanceId = entry.instanceId,
+                EventId = entry.Event.EventId,
+                SourceName = entry.SourceName,
+                Severity = entry.Event.Severity,
+                TimeRaised = entry.Timestamp, // 使用原始触发时间
+                TimeCleared = DateTime.MinValue,
+                MessageTemplate = entry.Event.MessageTemplate,
+                State = AlarmState.Arrived,
+                Message = SafeFormat(entry.Event.MessageTemplate, entry.Args) // 在后台拼字符串
+            };
+            _activeAlarms.TryAdd(key, model);
+            return model;
+        }
+
+        private AlarmModel? HandleClear(RawEventEntry entry)
+        {
+            if (_activeAlarms.Remove(entry.instanceId, out var existing))
+                return existing with { TimeCleared = entry.Timestamp, State = AlarmState.Left };
+
+            return null;
+        }
+
+        private void SafeBroadcast(EventBase model)
+        {
+            if (OnEventProcessed == null) return;
+
+            // 拆解多播委托，防止某一个 gRPC 客户端异常拖死其他人
+            foreach (Action<EventBase> handler in OnEventProcessed.GetInvocationList())
+            {
+                try
+                {
+                    handler(model);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "事件广播给订阅者时发生异常");
+                }
+            }
+        }
+
+        private static string SafeFormat(string template, object[] args)
+        {
+            if (args == null || args.Length == 0) return template;
+            try { return string.Format(template, args); } catch { return template; }
+        }
+
+        private enum EventOpType { Raise, Clear, Info }
+
+        private record RawEventEntry(
+            Guid instanceId,
+            EventOpType OpType,
+            string SourceName,
+            EventBase Event,
+            object[] Args,
+            DateTime Timestamp
+        );
+    }
+
+    public interface IEventProducer
+    {
+        void RaiseAlarm(string sourceName, Guid instanceId, EventBase alarm, params object[] args);
+        void ClearAlarm(string sourceName, Guid instanceId, EventBase alarm, params object[] args);
+        void SendInfo(string sourceName, EventBase info, params object[] args);
+    }
+}

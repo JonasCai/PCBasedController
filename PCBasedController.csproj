@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-PCBasedController-495f387d-e21e-45bf-add0-180d030b8bfc</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="MongoDB.Driver" Version="3.7.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="..\gRPCSharedData\gRPCSharedData.proto" GrpcServices="Server">
+      <Link>gRPC\gRPCSharedData.proto</Link>
+    </Protobuf>
+  </ItemGroup>
+</Project>
