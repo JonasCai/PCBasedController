@@ -65,7 +65,6 @@ namespace PCBasedController.EventLogger
             }
         }
         
-
         public void ClearAlarm(string sourceName, Guid instanceId, EventBase alarm, params object[] args)
         {
             var entry = new RawEventEntry(instanceId, EventOpType.Clear, sourceName, alarm, args, DateTime.UtcNow);
@@ -80,9 +79,9 @@ namespace PCBasedController.EventLogger
 
         private async Task ProcessEventsLoop()
         {
-            await foreach (var entry in _incomingChannel.Reader.ReadAllAsync(_cts.Token))
+            try
             {
-                try
+                await foreach (var entry in _incomingChannel.Reader.ReadAllAsync(_cts.Token))
                 {
                     EventBase? modelToProcess = entry.OpType switch
                     {
@@ -101,12 +100,14 @@ namespace PCBasedController.EventLogger
                         SafeBroadcast(modelToProcess);
                     }
                 }
-                catch (OperationCanceledException) { /* 正常停机忽略 */ }
-                catch (Exception ex)
-                {
-                    _logger.LogCritical(ex, "事件处理核心循环发生致命异常！");
-                }
             }
+            catch (OperationCanceledException) { /* 正常停机忽略 */ }
+            catch (Exception ex)
+            {
+                _logger.LogCritical(ex, "事件处理核心循环发生致命异常！");
+            }
+
+            
         }
 
         private MessageModel HandleInfo(RawEventEntry entry)
