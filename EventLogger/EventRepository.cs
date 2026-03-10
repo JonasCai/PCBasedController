@@ -99,8 +99,8 @@ namespace PCBasedController.EventLogger
 
                     if (bulkOps.Any())
                     {
-                        // 使用 IsOrdered = false，即使某条记录冲突，也不会阻塞其他记录的写入
-                        await _collection.BulkWriteAsync(bulkOps, new BulkWriteOptions { IsOrdered = false }, cancellationToken);
+                        // 将 IsOrdered 设为 true，保证同一批次内的时间戳时序，避免同一报警的清除动作被到达动作逆向覆盖
+                        await _collection.BulkWriteAsync(bulkOps, new BulkWriteOptions { IsOrdered = true }, cancellationToken);
                     }
 
                     batch.Clear();
@@ -112,6 +112,7 @@ namespace PCBasedController.EventLogger
                     batch.Clear();
                     break;
                 }
+                catch (OperationCanceledException) { /* 正常停机 */ }
                 catch (Exception ex)
                 {
                     retryCount++;
