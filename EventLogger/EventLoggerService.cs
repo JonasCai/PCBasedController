@@ -17,6 +17,7 @@ namespace PCBasedController.EventLogger
         private readonly ConcurrentDictionary<Guid, AlarmModel> _activeAlarms = new();
         private readonly CancellationTokenSource _cts = new();
         private readonly ILogger<EventLoggerService> _logger;
+        private readonly Task _processTask;
 
         // 使用事件向外层(gRPC)广播，这样 EventLoggerService 不需要知道 gRPC 的存在
         public event Action<EventBase>? OnEventProcessed;
@@ -35,7 +36,8 @@ namespace PCBasedController.EventLogger
             _incomingChannel = Channel.CreateBounded<RawEventEntry>(options);
 
             // 启动后台处理循环
-            Task.Factory.StartNew(ProcessEventsLoop, TaskCreationOptions.LongRunning);
+            _processTask = Task.Run(() => ProcessEventsLoop(_cts.Token));
+            
         }
 
         public void Dispose()
@@ -45,6 +47,15 @@ namespace PCBasedController.EventLogger
 
             // 给后台循环留出处理时间
             _cts.CancelAfter(TimeSpan.FromSeconds(2));
+
+            try
+            {
+                // 阻塞等待后台任务安全结束
+                _processTask.GetAwaiter().GetResult();
+            }
+            catch (TaskCanceledException) { }
+            catch (Exception ex) { _logger.LogError(ex, "事件仓储停机时发生异常"); }
+            _cts.Dispose();
         }
 
         /// <summary>
@@ -77,11 +88,11 @@ namespace PCBasedController.EventLogger
         public void SendInfo(string sourceName, EventBase info, params object[] args)
             => _incomingChannel.Writer.TryWrite(new RawEventEntry(Guid.NewGuid(), EventOpType.Info, sourceName, info, args, DateTime.UtcNow));
 
-        private async Task ProcessEventsLoop()
+        private async Task ProcessEventsLoop(CancellationToken cancellationToken)
         {
             try
             {
-                await foreach (var entry in _incomingChannel.Reader.ReadAllAsync(_cts.Token))
+                await foreach (var entry in _incomingChannel.Reader.ReadAllAsync(cancellationToken))
                 {
                     EventBase? modelToProcess = entry.OpType switch
                     {

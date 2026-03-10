@@ -132,8 +132,8 @@ namespace PCBasedController.EventLogger
             // 标记通道不再接收新数据
             _bufferChannel.Writer.TryComplete();
 
-            //  给予后台任务最多 3 秒的时间把剩余数据写入 MongoDB
-            _cts.CancelAfter(TimeSpan.FromSeconds(3));
+            // 给予后台任务最多 2 秒的时间把剩余数据写入 MongoDB
+            _cts.CancelAfter(TimeSpan.FromSeconds(2));
 
             try
             {
