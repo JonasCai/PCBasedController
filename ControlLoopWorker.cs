@@ -28,10 +28,24 @@ namespace PCBasedController
             _hwData = hwData;
         }
 
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        protected override Task ExecuteAsync(CancellationToken stoppingToken)
         {
             _logger.LogInformation($"控制循环已启动，目标周期: {TargetCycleTimeMs} ms");
 
+            // 创建一个专用的长期运行线程，避免干扰 ThreadPool
+            var thread = new Thread(() => HardwareControlLoop(stoppingToken))
+            {
+                Name = "Control_Loop_Thread",
+                Priority = ThreadPriority.Highest, // 提升线程优先级，保障实时性
+                IsBackground = true
+            };
+            thread.Start();
+
+            return Task.CompletedTask;
+        }
+
+        private void HardwareControlLoop(CancellationToken stoppingToken)
+        {
             TimeBeginPeriod(1);// 提升系统时钟分辨率 -》1ms
 
             try
@@ -43,14 +57,14 @@ namespace PCBasedController
                         : $"初始化失败，存在重名卡或系统冲突, 代码={Math.Abs(cardCount) - 1}";
                     TriggerHardwareFault(msg, -1, false);
 
-                    await Task.Delay(10000, stoppingToken);
+                    Thread.Sleep(10000);
                 }
 
                 ResetHardwareFault();
 
                 var stopwatch = new Stopwatch();
                 int errorCode = 0;
-                long currentTick = Environment.TickCount64;
+                long targetTicks = TimeSpan.FromMilliseconds(TargetCycleTimeMs).Ticks;
 
                 while (!stoppingToken.IsCancellationRequested)
                 {
@@ -79,10 +93,8 @@ namespace PCBasedController
 
                         if (!_hwData.IsFaulted)
                         {
-                            currentTick = Environment.TickCount64;
-
                             // --- 执行控制逻辑 ---
-                            //ProcessCell.Refresh(currentTick);//控制逻辑不抛出异常
+                            //ProcessCell.Refresh(Environment.TickCount64);//控制逻辑不抛出异常
                         }
                         else
                         {
@@ -106,17 +118,25 @@ namespace PCBasedController
                         try { _nodes.PushAll(); } catch { /* 尽最大努力安全输出 */ }
                     }
 
-                    // --- 周期对齐 ---
-                    var elapsed = stopwatch.ElapsedMilliseconds;
-                    int sleepTime = TargetCycleTimeMs - (int)elapsed;
+                    // --- 高精度周期对齐 ---
+                    long elapsedTicks = stopwatch.Elapsed.Ticks;
+                    long sleepTicks = targetTicks - elapsedTicks;
 
-                    if (sleepTime > 0)
+                    if (sleepTicks > 0)
                     {
-                        Thread.Sleep(sleepTime);
+                        int sleepMs = (int)(sleepTicks / TimeSpan.TicksPerMillisecond);
+
+                        if (sleepMs > 2)
+                        {
+                            // 减去 2ms 作为安全提前量，把大头时间交给系统去休眠，彻底释放 CPU
+                            Thread.Sleep(sleepMs - 2);
+                        }
+
+                        SpinWait.SpinUntil(() => stopwatch.Elapsed.Ticks >= targetTicks);
                     }
-                    else if (sleepTime < 0) // 如果超时，记录警告
+                    else if (sleepTicks < 0) // 如果超时，记录警告
                     {
-                        _logger.LogWarning($"周期超时! 耗时: {elapsed} ms");
+                        _logger.LogWarning($"周期超时! 耗时: {stopwatch.ElapsedMilliseconds} ms");
                     }
                 }
             }

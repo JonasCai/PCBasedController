@@ -30,7 +30,7 @@ namespace PCBasedController.EventLogger
             // 配置 1万 容量的防阻塞通道
             var options = new BoundedChannelOptions(10000)
             {
-                FullMode = BoundedChannelFullMode.DropOldest,
+                FullMode = BoundedChannelFullMode.DropWrite,
                 SingleReader = true,
                 SingleWriter = false
             };
@@ -43,7 +43,10 @@ namespace PCBasedController.EventLogger
         public void Save(EventBase evt)
         {
             if (!_bufferChannel.Writer.TryWrite(evt))
-                _logger.LogWarning($"事件缓冲池写入失败:{evt.EventId} | {evt.Severity}");
+            {
+                if(evt is AlarmModel alarm)
+                    _logger.LogWarning($"事件缓冲池写入失败:{alarm.InstanceId} - {alarm.SourceName} - {alarm.State} - {alarm.Message}");
+            }   
         }
 
         private async Task ProcessEventsAsync(CancellationToken cancellationToken)
@@ -72,9 +75,9 @@ namespace PCBasedController.EventLogger
 
         private async Task WriteBatchToDbAsync(List<EventBase> batch, CancellationToken cancellationToken)
         {
+            int retryCount = 0;
             while (batch.Count > 0 && !cancellationToken.IsCancellationRequested)
             {
-                int retryCount = 0;
                 try
                 {
                     var bulkOps = new List<WriteModel<EventBase>>();

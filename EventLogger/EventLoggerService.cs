@@ -30,7 +30,7 @@ namespace PCBasedController.EventLogger
             {
                 SingleReader = true,
                 SingleWriter = false,
-                FullMode = BoundedChannelFullMode.DropOldest
+                FullMode = BoundedChannelFullMode.DropWrite
             };
             _incomingChannel = Channel.CreateBounded<RawEventEntry>(options);
 
@@ -50,7 +50,7 @@ namespace PCBasedController.EventLogger
         /// <summary>
         /// 获取当前活跃报警快照 (供 gRPC 客户端刚连上来时使用)
         /// </summary>
-        public IEnumerable<AlarmModel> GetActiveAlarmsSnapshot() => _activeAlarms.Values;
+        public IEnumerable<AlarmModel> GetActiveAlarmsSnapshot() => _activeAlarms.Values.ToList();
 
         // ==========================================
         // IEventProducer 实现
@@ -60,8 +60,8 @@ namespace PCBasedController.EventLogger
             var entry = new RawEventEntry(instanceId, EventOpType.Raise, sourceName, alarm, args, DateTime.UtcNow);
             if (!_incomingChannel.Writer.TryWrite(entry))
             {
-                // 严谨性补充：当事件洪峰导致队列溢出时，记录直接的本地错误，以便工程师回溯
-                _logger.LogCritical($"[日志溢出丢失] 无法记录报警到达: {instanceId} - {sourceName} - {alarm.MessageTemplate}");
+                // 队列溢出时，记录直接的本地错误，以便工程师回溯
+                _logger.LogError($"[日志溢出丢失] 无法记录报警到达: {instanceId} - {sourceName} - {alarm.MessageTemplate}");
             }
         }
         
@@ -71,13 +71,12 @@ namespace PCBasedController.EventLogger
             var entry = new RawEventEntry(instanceId, EventOpType.Clear, sourceName, alarm, args, DateTime.UtcNow);
             if (!_incomingChannel.Writer.TryWrite(entry))
             {
-                _logger.LogCritical($"[日志溢出丢失] 无法记录报警离开: {instanceId} - {sourceName} - {alarm.MessageTemplate}");
+                _logger.LogError($"[日志溢出丢失] 无法记录报警离开: {instanceId} - {sourceName} - {alarm.MessageTemplate}");
             }
         }
 
         public void SendInfo(string sourceName, EventBase info, params object[] args)
             => _incomingChannel.Writer.TryWrite(new RawEventEntry(Guid.NewGuid(), EventOpType.Info, sourceName, info, args, DateTime.UtcNow));
-
 
         private async Task ProcessEventsLoop()
         {

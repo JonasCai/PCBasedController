@@ -42,8 +42,11 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
             if (Status == EMState.Busy)
                 OnExecute();
 
-            foreach (var cm in _cMs.Values)
-                cm.Refresh(currentTimestampMs);
+            var cache = _cMsCache; // ¶ÁÈ¡ volatile ÒýÓÃ
+            for (int i = 0; i < cache.Length; i++)
+            {
+                cache[i].Refresh(currentTimestampMs);
+            }
         }
         catch (Exception ex)
         {
@@ -91,7 +94,11 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
         }
     }
     protected bool StepTimeout(long ms) => StepTime > ms;
-    protected void RegisterCm(IControlModule cm) => _cMs.TryAdd(cm.Name, cm);
+    protected void RegisterCm(IControlModule cm)
+    {
+        if (_cMs.TryAdd(cm.Name, cm))
+            _cMsCache = _cMs.Values.ToArray();
+    }
 
 
     // ==========================================
@@ -103,6 +110,7 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     private bool _stepChangedPending = true;
     private readonly EquipmentModuleCfg _cfg = cfg;
     private readonly ILogger<S88EquipmentModuleBase> _logger = logger;
+    private volatile IControlModule[] _cMsCache = Array.Empty<IControlModule>();
     private readonly ConcurrentDictionary<string, IControlModule> _cMs = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
     private void PurgeCommands()

@@ -9,6 +9,7 @@ namespace PCBasedController.Hardware
 {
     public class LeadshineDmcDriver : IEtherCatDriver, IDisposable
     {
+        private bool _disposed = false;
         private const ushort _cardNo = 0;
         //Func 和 Action 泛型委托不支持带有 ref 或 out 参数的函数指针
         public delegate short DmcReadPortDelegate(ushort cardNo, ushort portNo, ref uint data);
@@ -63,7 +64,33 @@ namespace PCBasedController.Hardware
                 throw new DmcException($"控制卡热复位失败,故障码={errCode}", errCode);
         }
 
-        public void Dispose() => LTDMC.dmc_board_close();
+        public void Dispose()
+        {
+            Dispose(true);
+            // 告诉 GC 不要再调用析构函数
+            GC.SuppressFinalize(this);
+        }
+
+        // 终结器 (兜底防护：即使忘了写 using 或 Dispose，GC 回收时也会关停板卡)
+        ~LeadshineDmcDriver()
+        {
+            Dispose(false);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                if (disposing)
+                {
+                    ;// 释放其他托管资源
+                }
+
+                // 释放非托管资源 (无论是否是主动 Dispose 还是 GC 回收，都必须断开板卡)
+                LTDMC.dmc_board_close();
+                _disposed = true;
+            }
+        }
 
         private ushort GetHardwareErrorCode()
         {

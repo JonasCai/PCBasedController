@@ -203,7 +203,7 @@ namespace PCBasedController.gRPC
                 request.TargetUnit,
                 string.Empty,
                 "CMDDOWNLOADRECIPE",
-                new Dictionary<string, string>(),
+                new Dictionary<string, string>() { { "RecipeName", request.RecipeName } },
                 request.JsonPayload,
                 tcs,
                 linkedCts.Token);

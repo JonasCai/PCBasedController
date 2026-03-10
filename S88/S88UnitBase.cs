@@ -83,8 +83,11 @@ namespace PCBasedController.S88
                 }
 
                 // 5. 下级设备 (EM/CM)刷新
-                foreach (var member in _members.Values)
-                    member.Refresh(currentTimestampMs);
+                var cache = _membersCache; // 读取 volatile 引用
+                for (int i = 0; i < cache.Length; i++)
+                {
+                    cache[i].Refresh(currentTimestampMs);
+                }
             }
             catch (Exception ex)
             {
@@ -246,7 +249,14 @@ namespace PCBasedController.S88
         /// <summary>
         /// 供子类注册下级设备 (EM/CM)
         /// </summary>
-        protected void RegisterMember(IS88Object member) => _members.GetOrAdd(member.Name, member);
+        protected void RegisterMember(IS88Object member)
+        {
+            if (_members.TryAdd(member.Name, member))
+            {
+                // 每次注册新设备时，更新一次缓存。
+                _membersCache = _members.Values.ToArray();
+            }
+        }
         /// <summary>
         /// 存储切手动那一刻的物理快照，供 OnEnterAuto 比对
         /// </summary>
@@ -272,6 +282,7 @@ namespace PCBasedController.S88
         private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
         private long _currentTimestampMs = 0;
         private readonly ConcurrentDictionary<string, IS88Object> _members = new(StringComparer.OrdinalIgnoreCase);
+        private volatile IS88Object[] _membersCache = Array.Empty<IS88Object>();
         // 执行子类逻辑，如果返回true，则自动流转到下一个状态
         private void ExecuteLogic(Func<bool> action, S88State nextState)
         {

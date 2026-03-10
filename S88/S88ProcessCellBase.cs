@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using static MongoDB.Bson.Serialization.Serializers.SerializerHelper;
 
 namespace PCBasedController.S88
 {
@@ -50,8 +51,11 @@ namespace PCBasedController.S88
             HandleButtonLogic(currentTimestampMs);
 
             // 驱动所有 Unit 扫描
-            foreach (var unit in _units.Values)
-                unit.Refresh(currentTimestampMs);
+            var cache = _unitsCache; // 读取 volatile 引用
+            for (int i = 0; i < cache.Length; i++)
+            {
+                cache[i].Refresh(currentTimestampMs);
+            }
 
             // 更新状态位
             SaveOldButtonStates();
@@ -68,7 +72,14 @@ namespace PCBasedController.S88
         // ==========================================
         // 供子类调用的辅助方法
         // ==========================================
-        protected bool TryRegisterUnit(S88UnitBase unit) => _units.TryAdd(unit.Name, unit);
+        protected void RegisterMember(S88UnitBase unit)
+        {
+            if (_units.TryAdd(unit.Name, unit))
+            {
+                // 每次注册新设备时，更新一次缓存。
+                _unitsCache = _units.Values.ToArray();
+            }
+        }
         protected readonly IEventProducer _eventProducer = eventProducer;
         protected readonly ILogger<S88ProcessCellBase> _logger = logger;
 
@@ -134,10 +145,13 @@ namespace PCBasedController.S88
             }
 
             // 急停逻辑 (NC 触发)
-            if (!_eStopBtnState && _eStopBtnStateOld)
+            if (!_eStopBtnState)
             {
-                _eStopGuid = Guid.NewGuid();
-                _eventProducer.RaiseAlarm(Name, _eStopGuid, ProcellCellEvents.InfoEStopBtnTriggered);
+                if(_eStopBtnStateOld)
+                {
+                    _eStopGuid = Guid.NewGuid();
+                    _eventProducer.RaiseAlarm(Name, _eStopGuid, ProcellCellEvents.InfoEStopBtnTriggered);
+                }
                 BroadcastToUnits("CMDESTOP");
             }
 
@@ -186,6 +200,7 @@ namespace PCBasedController.S88
         private bool _startBtnState, _stopBtnState, _resetBtnState, _eStopBtnState, _manualAutoState;
         private bool _startBtnStateOld, _stopBtnStateOld, _resetBtnStateOld, _eStopBtnStateOld, _manualAutoStateOld;
         private readonly ProcessCellCfg _cfg = cfg;
+        private volatile S88UnitBase[] _unitsCache = Array.Empty<S88UnitBase>();
         private readonly ConcurrentDictionary<string, S88UnitBase> _units = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
     }
