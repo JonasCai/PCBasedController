@@ -26,7 +26,7 @@ namespace PCBasedController.S88
 
     public interface IEquipmentModule : IS88Object
     {
-        public EMState Status { get; }
+        public EMState State { get; }
         bool TryGetCm(string name, out IControlModule? cm);
     }
 

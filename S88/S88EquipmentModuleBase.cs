@@ -9,7 +9,7 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     // IEquipmentModule 接口方法
     // ==========================================
     public string Name => _cfg.Name;
-    public EMState Status { get; private set; } = EMState.Idle;
+    public EMState State { get; private set; } = EMState.Idle;
     public void ExecuteCommand(InternalCommand command)
     {
         if (command.TargetObject == _cfg.Name)
@@ -39,7 +39,7 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
 
             ProcessCommandQueue();
 
-            if (Status == EMState.Busy)
+            if (State == EMState.Busy)
                 OnExecute();
 
             var cache = _cMsCache; // 读取 volatile 引用
@@ -50,9 +50,9 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
         }
         catch (Exception ex)
         {
-            if (Status != EMState.Fault)
+            if (State != EMState.Fault)
             {
-                Status = EMState.Fault;
+                State = EMState.Fault;
                 _logger.LogError(ex, $"EM [{Name}] 发生内部异常，强制进入 Fault 状态");
             }
             ToSafe();
@@ -61,8 +61,10 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     public void ToSafe()
     {
         PurgeCommands();
-        foreach (var cm in _cMs.Values)
-            cm.ToSafe();
+        State = EMState.Idle;
+        var cache = _cMsCache; // 读取 volatile 引用
+        for (int i = 0; i < cache.Length; i++)
+            cache[i].ToSafe();
     }
     public bool TryGetCm(string name, out IControlModule? cm) => _cMs.TryGetValue(name, out cm);
 

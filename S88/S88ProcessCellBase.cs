@@ -36,8 +36,9 @@ namespace PCBasedController.S88
         public void ToSafe()
         {
             PurgeCommands();
-            foreach (var unit in _units.Values)
-                unit.ToSafe();
+            var cache = _unitsCache;
+            for (int i = 0; i < cache.Length; i++)
+                cache[i].ToSafe(); // 让各 CM 立即切断物理输出 (例如阀门关闭，电机掉使能等)
         }
         public void Refresh(long currentTimestampMs) //周期刷新(Cycle Logic)
         {
@@ -118,9 +119,10 @@ namespace PCBasedController.S88
                     case "CMDRESET":
                     case "CMDSETMODE":
                         cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        foreach (var unit in _units.Values)
-                            if (unit.IsActive)
-                                unit.ExecuteCommand(cmd with { TargetUnit = unit.Name, CallbackTcs = null });
+                        var cache = _unitsCache;
+                        for (int i = 0; i < cache.Length; i++)
+                            if (cache[i].IsActive)
+                                cache[i].ExecuteCommand(cmd with { TargetUnit = cache[i].Name, CallbackTcs = null });
                         break;
                     default:
                         cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}"));
@@ -173,11 +175,10 @@ namespace PCBasedController.S88
         }
         private void BroadcastToUnits(string cmdName, Dictionary<string, string>? args = null)
         {
-            foreach (var u in _units.Values)
-            {
-                if (u.IsActive)
-                    u.ExecuteCommand(new InternalCommand(u.Name, u.Name, cmdName, args ?? new()));
-            }
+            var cache = _unitsCache;
+            for (int i = 0; i < cache.Length; i++)
+                if (cache[i].IsActive)
+                    cache[i].ExecuteCommand(new InternalCommand(cache[i].Name, cache[i].Name, cmdName, args ?? new()));
         }
         private void UpdatePhysicalButtons()
         {

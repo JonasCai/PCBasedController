@@ -116,14 +116,16 @@ namespace PCBasedController.S88
                     return;
                 }
 
-                foreach (var obj in _members.Values)
+                var cache = _membersCache; // 读取 volatile 引用
+                for (int i = 0; i < cache.Length; i++)
                 {
-                    if (obj is IEquipmentModule em && em.TryGetCm(command.TargetObject, out IControlModule? cm))
+                    if (cache[i] is IEquipmentModule em && em.TryGetCm(command.TargetObject, out IControlModule? cm))
                     {
                         cm!.ExecuteCommand(command);
                         return;
                     }
                 }
+
                 command.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令目标未知：{command.TargetUnit}.{command.TargetObject}"));
                 return;
             }
@@ -133,8 +135,11 @@ namespace PCBasedController.S88
         public void ToSafe()
         {
             PurgeCommands();
-            foreach (var member in _members.Values)
-                member.ToSafe(); //各EM、CM执行ToSafe
+            TryTransition(S88Command.Abort);
+
+            var cache = _membersCache;
+            for (int i = 0; i < cache.Length; i++)
+                cache[i].ToSafe(); // 级联让各 EM、CM 立即切断物理输出 (例如阀门关闭，电机掉使能等)
         }
         public S88State State
         {
