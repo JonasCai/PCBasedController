@@ -4,12 +4,12 @@ using System.Runtime.InteropServices;
 
 namespace PCBasedController
 {
-    public class ControlLoopWorker : BackgroundService
+    public class ControlLoopWorker(ILogger<ControlLoopWorker> logger, LeadshineDmcDriver driver, IONodes nodes, HwData hwData) : BackgroundService
     {
-        private readonly ILogger<ControlLoopWorker> _logger;
-        private readonly LeadshineDmcDriver _driver;
-        private readonly IONodes _nodes;
-        private readonly HwData _hwData;
+        private readonly ILogger<ControlLoopWorker> _logger = logger;
+        private readonly LeadshineDmcDriver _driver = driver;
+        private readonly IONodes _nodes = nodes;
+        private readonly HwData _hwData = hwData;
 
         // 引入系统时钟精度设置
         [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
@@ -20,28 +20,32 @@ namespace PCBasedController
 
         private const int TargetCycleTimeMs = 10; // 设定 10ms 周期
 
-        public ControlLoopWorker(ILogger<ControlLoopWorker> logger, LeadshineDmcDriver driver, IONodes nodes, HwData hwData)
-        {
-            _logger = logger;
-            _driver = driver;
-            _nodes = nodes;
-            _hwData = hwData;
-        }
-
         protected override Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _logger.LogInformation($"控制循环已启动，目标周期: {TargetCycleTimeMs} ms");
+            _logger.LogInformation("控制循环已启动，目标周期: {Cycle} ms", TargetCycleTimeMs);
 
-            // 创建一个专用的长期运行线程，避免干扰 ThreadPool
-            var thread = new Thread(() => HardwareControlLoop(stoppingToken))
+            var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    HardwareControlLoop(stoppingToken);
+                    tcs.TrySetResult(null);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            })
             {
                 Name = "Control_Loop_Thread",
-                Priority = ThreadPriority.Highest, // 提升线程优先级，保障实时性
+                Priority = ThreadPriority.AboveNormal,
                 IsBackground = true
             };
-            thread.Start();
 
-            return Task.CompletedTask;
+            thread.Start();
+            return tcs.Task;
         }
 
         private void HardwareControlLoop(CancellationToken stoppingToken)
@@ -50,15 +54,22 @@ namespace PCBasedController
 
             try
             {
-                while (!_driver.Initialize(out short cardCount))
+                while (!stoppingToken.IsCancellationRequested)
                 {
+                    if (_driver.Initialize(out short cardCount))
+                        break;
+
                     var msg = cardCount == 0
                         ? "初始化失败，未找到控制卡或控制卡异常"
                         : $"初始化失败，存在重名卡或系统冲突, 代码={Math.Abs(cardCount) - 1}";
+
                     TriggerHardwareFault(msg, -1, false);
 
-                    Thread.Sleep(10000);
+                    WaitWithCancel(TimeSpan.FromSeconds(10), stoppingToken);
                 }
+
+                if (stoppingToken.IsCancellationRequested)
+                    return;
 
                 ResetHardwareFault();
 
@@ -77,7 +88,7 @@ namespace PCBasedController
                         {
                             _logger.LogInformation("正在重置控制卡...");
                             _driver.Reset();
-                            Thread.Sleep(5000);//等待复位完成
+                            WaitWithCancel(TimeSpan.FromSeconds(5), stoppingToken);
                             ResetHardwareFault();
                             continue;
                         }
@@ -119,8 +130,7 @@ namespace PCBasedController
                     }
 
                     // --- 高精度周期对齐 ---
-                    long elapsedTicks = stopwatch.Elapsed.Ticks;
-                    long sleepTicks = targetTicks - elapsedTicks;
+                    long sleepTicks = targetTicks - stopwatch.Elapsed.Ticks;
 
                     if (sleepTicks > 0)
                     {
@@ -128,15 +138,16 @@ namespace PCBasedController
 
                         if (sleepMs > 2)
                         {
-                            // 减去 2ms 作为安全提前量，把大头时间交给系统去休眠，彻底释放 CPU
                             Thread.Sleep(sleepMs - 2);
                         }
 
-                        SpinWait.SpinUntil(() => stopwatch.Elapsed.Ticks >= targetTicks);
+                        SpinWait.SpinUntil(() =>
+                            stoppingToken.IsCancellationRequested ||
+                            stopwatch.Elapsed.Ticks >= targetTicks);
                     }
                     else if (sleepTicks < 0) // 如果超时，记录警告
                     {
-                        _logger.LogWarning($"周期超时! 耗时: {stopwatch.ElapsedMilliseconds} ms");
+                        _logger.LogWarning("周期超时! 耗时: {Elapsed} ms", stopwatch.ElapsedMilliseconds);
                     }
                 }
             }
@@ -154,6 +165,15 @@ namespace PCBasedController
             }
         }
 
+        private static void WaitWithCancel(TimeSpan timeout, CancellationToken token)
+        {
+            var end = DateTime.UtcNow + timeout;
+            while (!token.IsCancellationRequested && DateTime.UtcNow < end)
+            {
+                Thread.Sleep(100);
+            }
+        }
+
         private bool CheckHardwareSafe(out int errorCode)
         {
             errorCode = _driver.ErrorCode;
@@ -164,7 +184,7 @@ namespace PCBasedController
         {
             if (!_hwData.IsFaulted)
             {
-                _logger.LogError($"系统进入故障安全状态: {msg}");
+                _logger.LogError("系统进入故障安全状态: {Msg}", msg);
             }
             _hwData.IsFaulted = true;
             _hwData.Message = msg;

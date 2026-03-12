@@ -17,6 +17,7 @@ namespace PCBasedController._01.ControlModule
             _eventProducer = eventProducer;
             _cfg = cfg;
             _logger = logger;
+            RegisterCommandHandlers();
 
             if (!_cfg.Validate())
                 throw new ArgumentException($"气缸[{_cfg.Name}]配置不完整", nameof(_cfg));
@@ -230,6 +231,7 @@ namespace PCBasedController._01.ControlModule
         private CylinderState _state = CylinderState.Unknown;
         private CylinderError _errorId = CylinderError.None;
         private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
+        private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
         private void TransitionToError(CylinderError err, EventBase eventbase, params object[] args)
         {
             if (_state == CylinderState.Error) return;
@@ -249,37 +251,21 @@ namespace PCBasedController._01.ControlModule
                 // 死亡确认
                 if (cmd.CancelToken.IsCancellationRequested)
                 {
-                    _logger.LogWarning($"指令 [{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}] 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃");
+                    _logger.LogWarning("指令 {TargetUnit}.{TargetObject}.{CmdName} 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
                     continue;
                 }
 
-                switch (cmd.CommandName.ToUpperInvariant())
+                // 查表执行
+                if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
                 {
-                    case "CMDRETRACT":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        MoveRetract();
-                        break;
-
-                    case "CMDEXTEND":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        MoveExtend();
-                        break;
-
-                    case "CMDRESET":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        Reset();
-                        break;
-
-                    case "CMDRESETSTATISTICS":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        ResetStatistics();
-                        break;
-
-                    default:
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}"));
-                        break;
+                    handler(cmd); // 执行绑定的动作
+                }
+                else
+                {
+                    cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令处理未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CmdName}"));
                 }
             }
+
         }
         private void PurgeCommands()
         {
@@ -291,7 +277,7 @@ namespace PCBasedController._01.ControlModule
                         CommandResultType.Rejected,
                         "指令被系统强制清理，未执行"
                     ));
-                    _logger.LogWarning($"指令 [{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}] 被系统强制清理，未执行");
+                    _logger.LogWarning("指令 {TargetUnit}.{TargetObject}.{CmdName} 被系统强制清理，未执行", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
                 }
             }
         }
@@ -308,6 +294,33 @@ namespace PCBasedController._01.ControlModule
                 _eventProducer.ClearAlarm(_cfg.Name, alarm.Key, alarm.Value.eventBase, alarm.Value.args);
 
             _activeAlarms.Clear();
+        }
+        private void RegisterCommandHandlers()
+        {
+            _commandHandlers[Command.Extend] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                MoveExtend();
+            };
+
+            _commandHandlers[Command.Retract] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                MoveRetract();
+            };
+
+            _commandHandlers[Command.Reset] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                Reset();
+            };
+
+            _commandHandlers[Command.ResetStatistics] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                ResetStatistics();
+            };
+
         }
     }
 

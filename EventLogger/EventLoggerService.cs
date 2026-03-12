@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics.Eventing.Reader;
 using System.Linq;
 using System.Reflection;
+using System.Security.Claims;
 using System.Text;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -72,7 +73,7 @@ namespace PCBasedController.EventLogger
             if (!_incomingChannel.Writer.TryWrite(entry))
             {
                 // 队列溢出时，记录直接的本地错误，以便工程师回溯
-                _logger.LogError($"[日志溢出丢失] 无法记录报警到达: {instanceId} - {sourceName} - {alarm.MessageTemplate}");
+                _logger.LogError("[日志溢出丢失] 无法记录报警到达: {InstanceId} - {SourceName} - {MessageTemplate}", instanceId, sourceName, alarm.MessageTemplate);
             }
         }
         
@@ -81,12 +82,19 @@ namespace PCBasedController.EventLogger
             var entry = new RawEventEntry(instanceId, EventOpType.Clear, sourceName, alarm, args, DateTime.UtcNow);
             if (!_incomingChannel.Writer.TryWrite(entry))
             {
-                _logger.LogError($"[日志溢出丢失] 无法记录报警离开: {instanceId} - {sourceName} - {alarm.MessageTemplate}");
+                _logger.LogError("[日志溢出丢失] 无法记录报警离开: {InstanceId} - {SourceName} - {MessageTemplate}", instanceId, sourceName, alarm.MessageTemplate);
             }
         }
 
         public void SendInfo(string sourceName, EventBase info, params object[] args)
-            => _incomingChannel.Writer.TryWrite(new RawEventEntry(Guid.NewGuid(), EventOpType.Info, sourceName, info, args, DateTime.UtcNow));
+        {
+            var entry = new RawEventEntry(Guid.NewGuid(), EventOpType.Info, sourceName, info, args, DateTime.UtcNow);
+            if(!_incomingChannel.Writer.TryWrite(entry))
+            {
+                _logger.LogError("[日志溢出丢失] 无法记录事件: {InstanceId} - {SourceName} - {MessageTemplate}", entry.instanceId, sourceName, entry.Event.MessageTemplate);
+            }
+        }
+            
 
         private async Task ProcessEventsLoop(CancellationToken cancellationToken)
         {

@@ -83,6 +83,22 @@ namespace PCBasedController.S88
         }
         protected readonly IEventProducer _eventProducer = eventProducer;
         protected readonly ILogger<S88ProcessCellBase> _logger = logger;
+        protected virtual void RegisterCommandHandlers()
+        {
+            Action<InternalCommand> action = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                var cache = _unitsCache;
+                for (int i = 0; i < cache.Length; i++)
+                    if (cache[i].IsActive)
+                        cache[i].ExecuteCommand(cmd with { TargetUnit = cache[i].Name, CallbackTcs = null });
+            };
+
+            _commandHandlers[Command.Start] = action;
+            _commandHandlers[Command.Stop] = action;
+            _commandHandlers[Command.Reset] = action;
+            _commandHandlers[Command.SetMode] = action;
+        }
 
 
         // ==========================================
@@ -98,52 +114,25 @@ namespace PCBasedController.S88
                         CommandResultType.Rejected,
                         "指令被系统强制清理，未执行"
                     ));
-                    _logger.LogWarning($"指令 [{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}] 被系统强制清理，未执行");
+                    _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 被系统强制清理，未执行", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
                 }
             }
         }
-        private void ProcessCommandQueue()
-        {
-            while (_commandQueue.TryDequeue(out var cmd))
-            {
-                if (cmd.CancelToken.IsCancellationRequested)
-                {
-                    _logger.LogWarning($"指令 [{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}] 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃");
-                    continue;
-                }
-
-                switch (cmd.CommandName.ToUpperInvariant())
-                {
-                    case "CMDSTART":
-                    case "CMDSTOP":
-                    case "CMDRESET":
-                    case "CMDSETMODE":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        var cache = _unitsCache;
-                        for (int i = 0; i < cache.Length; i++)
-                            if (cache[i].IsActive)
-                                cache[i].ExecuteCommand(cmd with { TargetUnit = cache[i].Name, CallbackTcs = null });
-                        break;
-                    default:
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}"));
-                        break;
-                }
-            }
-        }
+        
         private void HandleButtonLogic(long ts)
         {
             // 启动逻辑
             if (_startBtnState && !_startBtnStateOld)
             {
                 _eventProducer.SendInfo(Name, ProcellCellEvents.InfoStartBtnTriggered);
-                BroadcastToUnits("CMDSTART");
+                BroadcastToUnits(Command.Start);
             }
 
             // 停止逻辑 (NC 触发)
             if (!_stopBtnState && _stopBtnStateOld)
             {
                 _eventProducer.SendInfo(Name, ProcellCellEvents.InfoStopBtnTriggered);
-                BroadcastToUnits("CMDSTOP");
+                BroadcastToUnits(Command.Stop);
             }
 
             // 急停逻辑 (NC 触发)
@@ -154,7 +143,7 @@ namespace PCBasedController.S88
                     _eStopGuid = Guid.NewGuid();
                     _eventProducer.RaiseAlarm(Name, _eStopGuid, ProcellCellEvents.InfoEStopBtnTriggered);
                 }
-                BroadcastToUnits("CMDESTOP");
+                BroadcastToUnits(Command.EStop);
             }
 
             // 急停取消 (NC 触发) 
@@ -170,10 +159,10 @@ namespace PCBasedController.S88
                 _eventProducer.SendInfo(Name, ProcellCellEvents.InfoManualAutoSwitchTriggered, modeStr);
 
                 var para = new Dictionary<string, string> { { "NewMode", modeStr } };
-                BroadcastToUnits("CMDSETMODE", para);
+                BroadcastToUnits(Command.SetMode, para);
             }
         }
-        private void BroadcastToUnits(string cmdName, Dictionary<string, string>? args = null)
+        private void BroadcastToUnits(Command cmdName, Dictionary<string, string>? args = null)
         {
             var cache = _unitsCache;
             for (int i = 0; i < cache.Length; i++)
@@ -202,8 +191,32 @@ namespace PCBasedController.S88
         private bool _startBtnStateOld, _stopBtnStateOld, _resetBtnStateOld, _eStopBtnStateOld, _manualAutoStateOld;
         private readonly ProcessCellCfg _cfg = cfg;
         private volatile S88UnitBase[] _unitsCache = Array.Empty<S88UnitBase>();
+        private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
         private readonly ConcurrentDictionary<string, S88UnitBase> _units = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
+        private void ProcessCommandQueue()
+        {
+            while (_commandQueue.TryDequeue(out var cmd))
+            {
+                if (cmd.CancelToken.IsCancellationRequested)
+                {
+                    _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
+                    continue;
+                }
+
+                // 查表执行
+                if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
+                {
+                    handler(cmd); // 执行绑定的动作
+                }
+                else
+                {
+                    cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令处理未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CmdName}"));
+                }
+
+            }
+
+        }
     }
 
     public class ProcessCellCfg

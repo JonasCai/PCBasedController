@@ -53,7 +53,7 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
             if (State != EMState.Fault)
             {
                 State = EMState.Fault;
-                _logger.LogError(ex, $"EM [{Name}] 发生内部异常，强制进入 Fault 状态");
+                _logger.LogError(ex, "EM [{Name}] 发生内部异常，强制进入 Fault 状态",Name);
             }
             ToSafe();
         }
@@ -72,7 +72,6 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     // ==========================================
     // 供子类重写的逻辑钩子 (Hooks)
     // ==========================================
-    protected abstract bool ProcessCommand(InternalCommand cmd);
     protected virtual void OnExecute() { }
     protected virtual void CheckHardwareInterlocks() { }
 
@@ -101,6 +100,7 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
         if (_cMs.TryAdd(cm.Name, cm))
             _cMsCache = _cMs.Values.ToArray();
     }
+    protected void RegisterCommandHandler(Command cmdName, Action<InternalCommand> handler) => _commandHandlers[cmdName] = handler;
 
 
     // ==========================================
@@ -111,6 +111,7 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
     private long _stepStartTimestamp;
     private bool _stepChangedPending = true;
     private readonly EquipmentModuleCfg _cfg = cfg;
+    private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
     private readonly ILogger<S88EquipmentModuleBase> _logger = logger;
     private volatile IControlModule[] _cMsCache = Array.Empty<IControlModule>();
     private readonly ConcurrentDictionary<string, IControlModule> _cMs = new(StringComparer.OrdinalIgnoreCase);
@@ -125,7 +126,7 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
                     CommandResultType.Rejected,
                     "指令被系统强制清理，未执行"
                 ));
-                _logger.LogWarning($"指令 [{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}] 被系统强制清理，未执行");
+                _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 被系统强制清理，未执行", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
             }
         }
     }
@@ -135,12 +136,21 @@ public abstract class S88EquipmentModuleBase(EquipmentModuleCfg cfg, ILogger<S88
         {
             if (cmd.CancelToken.IsCancellationRequested)
             {
-                _logger.LogWarning($"指令 [{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}] 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃");
+                _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
                 continue;
             }
 
-            ProcessCommand(cmd);
+            // 查表执行
+            if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
+            {
+                handler(cmd); // 执行绑定的动作
+            }
+            else
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令处理未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CmdName}"));
+            }
         }
+
     }
 }
 

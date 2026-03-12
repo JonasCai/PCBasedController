@@ -26,12 +26,8 @@ namespace PCBasedController.gRPC
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken, cts.Token);
 
-            // 定义白名单指令（故障时仍允许执行）
-            var whiteList = new[] { "" };
-            bool isMaintenanceCmd = whiteList.Any(c => request.CommandName.ToUpper().Contains(c));
-
             // 硬件故障时的拦截逻辑
-            if (_hwData.IsFaulted && !isMaintenanceCmd)
+            if (_hwData.IsFaulted)
             {
                 return new ControlCommandResponse
                 {
@@ -40,12 +36,18 @@ namespace PCBasedController.gRPC
                 };
             }
 
+            Command cmdName;
+            if (!System.Enum.TryParse<Command>(request.CommandName, true, out cmdName))
+            {
+                return new ControlCommandResponse { Success = false, Message = $"指令未定义：{request.CommandName}" };
+            }
+
             // 将 Proto 消息转换为内部指令对象
             var internalCmd = new InternalCommand(request.TargetUnit,
                 request.TargetObject,
-                request.CommandName,
+                cmdName,
                 request.Params.ToDictionary(k => k.Key, v => v.Value, StringComparer.OrdinalIgnoreCase),
-                string.Empty,
+                request.JsonPayload,
                 tcs,
                 linkedCts.Token);
 
@@ -191,49 +193,6 @@ namespace PCBasedController.gRPC
         {
             _hwData.RequestReset(); // 请求复位
             return Task.FromResult(new ResetHwReply { Success = true, Message = "复位指令已接收" });
-        }
-
-        public override async Task<RecipeDownloadResponse> DownloadRecipe(RecipeDownloadRequest request, ServerCallContext context)
-        {
-            var tcs = new TaskCompletionSource<CommandResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken, cts.Token);
-
-            var internalCmd = new InternalCommand(
-                request.TargetUnit,
-                string.Empty,
-                "CMDDOWNLOADRECIPE",
-                new Dictionary<string, string>() { { "RecipeName", request.RecipeName } },
-                request.JsonPayload,
-                tcs,
-                linkedCts.Token);
-
-            if(_processCell.TryGetUnit(request.TargetUnit, out var unit))
-            {
-                unit!.ExecuteCommand(internalCmd);
-            }
-            else
-            {
-                return new RecipeDownloadResponse { Success = false, Message = $"找不到目标Unit {request.TargetUnit}" };
-            }
-
-            try
-            {
-                using (linkedCts.Token.Register(() => tcs.TrySetCanceled()))
-                {
-                    CommandResult result = await tcs.Task;
-                    return new RecipeDownloadResponse { Success = result.Type == CommandResultType.Accepted, Message = result.Message };
-                }
-            }
-            catch (TaskCanceledException)
-            {
-                // 捕捉超时或断开异常
-                if (cts.IsCancellationRequested)
-                {
-                    return new RecipeDownloadResponse { Success = false, Message = "控制器响应超时（可能主循环已卡死或者指令被系统强制清理）" };
-                }
-                return new RecipeDownloadResponse { Success = false, Message = "客户端取消了请求" };
-            }
         }
 
         public override Task<RecipeUploadResponse> UploadRecipe(RecipeUploadRequest request, ServerCallContext context)

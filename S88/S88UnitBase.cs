@@ -130,7 +130,7 @@ namespace PCBasedController.S88
                 return;
             }
 
-            command.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"当前 {command.TargetUnit} 处于 {Mode} 模式，无法执行：{command.TargetObject}.{command.CommandName}"));
+            command.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"当前 {command.TargetUnit} 处于 {Mode} 模式，无法执行：{command.TargetObject}.{command.CmdName}"));
         }
         public void ToSafe()
         {
@@ -191,6 +191,98 @@ namespace PCBasedController.S88
             return true;
         }
         protected virtual void OnApplyRecipe(string jsonPayload) { }
+        protected virtual void RegisterCommandHandlers()
+        {
+            _commandHandlers[Command.Start] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Start);
+            };
+
+            _commandHandlers[Command.Stop] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Stop);
+            };
+
+            _commandHandlers[Command.Hold] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Hold);
+            };
+
+            _commandHandlers[Command.Unhold] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Unhold);
+            };
+
+            _commandHandlers[Command.Suspend] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Suspend);
+            };
+
+            _commandHandlers[Command.Unsuspend] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Unsuspend);
+            };
+
+            _commandHandlers[Command.Abort] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Abort);
+            };
+
+            _commandHandlers[Command.EStop] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Abort);
+            };
+
+            _commandHandlers[Command.Reset] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Reset);
+            };
+
+            _commandHandlers[Command.Complete] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Complete);
+            };
+
+            _commandHandlers[Command.Clear] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                TryTransition(S88Command.Clear);
+            };
+
+            _commandHandlers[Command.NextStep] = cmd =>
+            {
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                CmdNextStep();
+            };
+
+            _commandHandlers[Command.SetMode] = cmd =>
+            {
+                if (cmd.Params.TryGetValue("NewMode", out var modeStr) &&
+                        Enum.TryParse<S88Mode>(modeStr, true, out var newMode))
+                {
+                    cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
+                    CmdChangeMode(newMode);
+                    return;
+                }
+
+                cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"模式切换失败，参数 NewMode 不对"));
+            };
+
+            _commandHandlers[Command.DownloadRecipe] = cmd =>
+            {
+                CmdDownloadRecipe(cmd);
+            };
+        }
 
         // ==========================================
         // 供子类调用的辅助方法
@@ -268,9 +360,9 @@ namespace PCBasedController.S88
         protected Dictionary<string, string> _autoContextSnapshot = new();
 
         // 日志方法
-        protected void LogInfo(string msg) => _logger.LogInformation($"[{Name}] {msg}");
-        protected void LogWarning(string msg) => _logger.LogWarning($"[{Name}] {msg}");
-        protected void LogError(Exception ex, string msg) => _logger.LogError(ex, $"[{Name}] ERR: {msg}");
+        protected void LogInfo(string msg) => _logger.LogInformation("[{Name}] - {Msg}",Name,msg);
+        protected void LogWarning(string msg) => _logger.LogWarning("[{Name}] - {Msg}", Name, msg);
+        protected void LogError(Exception ex, string msg) => _logger.LogError(ex, "[{Name}] - ERR: {Msg}", Name, msg);
 
         // ==========================================
         // 私有成员
@@ -286,6 +378,7 @@ namespace PCBasedController.S88
         private S88State _previousState = S88State.Idle;
         private readonly ConcurrentQueue<InternalCommand> _commandQueue = new();
         private long _currentTimestampMs = 0;
+        private readonly Dictionary<Command, Action<InternalCommand>> _commandHandlers = new();
         private readonly ConcurrentDictionary<string, IS88Object> _members = new(StringComparer.OrdinalIgnoreCase);
         private volatile IS88Object[] _membersCache = Array.Empty<IS88Object>();
         // 执行子类逻辑，如果返回true，则自动流转到下一个状态
@@ -295,97 +388,6 @@ namespace PCBasedController.S88
             bool isDone = action();
             if (isDone)
                 State = nextState;
-        }
-        private void ProcessCommandQueue()
-        {
-            while (_commandQueue.TryDequeue(out var cmd))
-            {
-                if (cmd == null) continue;
-
-                if (cmd.CancelToken.IsCancellationRequested)
-                {
-                    _logger.LogWarning($"指令 [{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}] 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃");
-                    continue;
-                }
-
-                switch (cmd.CommandName.ToUpperInvariant())
-                {
-                    case "CMDSTART":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Start);
-                        break;
-
-                    case "CMDSTOP":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Stop);
-                        break;
-
-                    case "CMDHOLD":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Hold);
-                        break;
-
-                    case "CMDSUSPEND":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Suspend);
-                        break;
-
-                    case "CMDUNHOLD":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Unhold);
-                        break;
-
-                    case "CMDUNSUSPEND":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Unsuspend);
-                        break;
-
-                    case "CMDESTOP":
-                    case "CMDABORT":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Abort);
-                        break;
-
-                    case "CMDRESET":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Reset);
-                        break;
-
-                    case "CMDCOMPLETE":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Complete);
-                        break;
-
-                    case "CMDCLEAR":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        TryTransition(S88Command.Clear);
-                        break;
-
-                    case "CMDNEXTSTEP":
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                        CmdNextStep();
-                        break;
-
-                    case "CMDSETMODE":
-                        if (cmd.Params.TryGetValue("NewMode", out var modeStr) &&
-                            Enum.TryParse<S88Mode>(modeStr, true, out var newMode))
-                        {
-                            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
-                            CmdChangeMode(newMode);
-                            break;
-                        }
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"模式切换失败，参数 NewMode 不对"));
-                        break;
-
-                    case "CMDDOWNLOADRECIPE":
-                        CmdDownloadRecipe(cmd);
-                        break;
-
-                    default:
-                        cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}"));
-                        break;
-                }
-            }
         }
         private void TryTransition(S88Command cmd)
         {
@@ -535,7 +537,7 @@ namespace PCBasedController.S88
                         CommandResultType.Rejected,
                         "指令被系统强制清理，未执行"
                     ));
-                    _logger.LogWarning($"指令 [{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CommandName}] 被系统强制清理，未执行");
+                    _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 被系统强制清理，未执行", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
                 }
             }
         }
@@ -566,6 +568,30 @@ namespace PCBasedController.S88
             // 通知UI
             cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, "配方下载并校验成功！"));
         }
+        private void ProcessCommandQueue()
+        {
+            while (_commandQueue.TryDequeue(out var cmd))
+            {
+                if (cmd == null) continue;
+
+                if (cmd.CancelToken.IsCancellationRequested)
+                {
+                    _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 在排队期间已被调用方取消或超时 (3s)，已作为僵尸指令安全丢弃", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
+                    continue;
+                }
+
+                // 查表执行
+                if (_commandHandlers.TryGetValue(cmd.CmdName, out var handler))
+                {
+                    handler(cmd); // 执行绑定的动作
+                }
+                else
+                {
+                    cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"指令处理未定义：{cmd.TargetUnit}.{cmd.TargetObject}.{cmd.CmdName}"));
+                }
+            }
+        }
+        
     }
 
     public enum GuardResult

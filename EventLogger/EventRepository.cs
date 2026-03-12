@@ -45,7 +45,7 @@ namespace PCBasedController.EventLogger
             if (!_bufferChannel.Writer.TryWrite(evt))
             {
                 if(evt is AlarmModel alarm)
-                    _logger.LogWarning($"事件缓冲池写入失败:{alarm.InstanceId} - {alarm.SourceName} - {alarm.State} - {alarm.Message}");
+                    _logger.LogWarning("事件缓冲池写入失败:{InstanceId} - {SourceName} - {State} - {Message}", alarm.InstanceId, alarm.SourceName, alarm.State, alarm.Message);
             }   
         }
 
@@ -122,7 +122,7 @@ namespace PCBasedController.EventLogger
                         batch.Clear();
                         break;
                     }
-                    _logger.LogError(ex, $"MongoDB 网络或执行失败。5秒后进行第 {retryCount} 次重试...");
+                    _logger.LogError(ex, "MongoDB 网络或执行失败。5秒后进行第 {RetryCount} 次重试...", retryCount);
                     await Task.Delay(5000, cancellationToken);
                 }
             }
