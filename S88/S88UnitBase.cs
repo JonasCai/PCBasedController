@@ -185,87 +185,81 @@ namespace PCBasedController.S88
         protected virtual GuardResult GlobalGuardCheck() => GuardResult.Ok; // 安全/故障检测及动作，由具体的 Unit 实现
         protected virtual void CaptureContextSnapshot(Dictionary<string, string> snapshot) { }// 保存状态快照
         protected virtual bool VerifyContextSnapshot(Dictionary<string, string> snapshot) => false;// 校验状态快照
-        protected virtual bool OnValidateRecipe(string jsonPayload, out string errorMessage)
-        {
-            errorMessage = string.Empty;
-            return true;
-        }
-        protected virtual void OnApplyRecipe(string jsonPayload) { }
         protected virtual void RegisterCommandHandlers()
         {
-            _commandHandlers[Command.Start] = cmd =>
+            RegisterCommandHandler(Command.Start, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Start);
-            };
+            });
 
-            _commandHandlers[Command.Stop] = cmd =>
+            RegisterCommandHandler(Command.Stop, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Stop);
-            };
+            });
 
-            _commandHandlers[Command.Hold] = cmd =>
+            RegisterCommandHandler(Command.Hold, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Hold);
-            };
+            });
 
-            _commandHandlers[Command.Unhold] = cmd =>
+            RegisterCommandHandler(Command.Unhold, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Unhold);
-            };
+            });
 
-            _commandHandlers[Command.Suspend] = cmd =>
+            RegisterCommandHandler(Command.Suspend, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Suspend);
-            };
+            });
 
-            _commandHandlers[Command.Unsuspend] = cmd =>
+            RegisterCommandHandler(Command.Unsuspend, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Unsuspend);
-            };
+            });
 
-            _commandHandlers[Command.Abort] = cmd =>
+            RegisterCommandHandler(Command.Abort, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Abort);
-            };
+            });
 
-            _commandHandlers[Command.EStop] = cmd =>
+            RegisterCommandHandler(Command.EStop, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Abort);
-            };
+            });
 
-            _commandHandlers[Command.Reset] = cmd =>
+            RegisterCommandHandler(Command.Reset, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Reset);
-            };
+            });
 
-            _commandHandlers[Command.Complete] = cmd =>
+            RegisterCommandHandler(Command.Complete, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Complete);
-            };
+            });
 
-            _commandHandlers[Command.Clear] = cmd =>
+            RegisterCommandHandler(Command.Clear, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 TryTransition(S88Command.Clear);
-            };
+            });
 
-            _commandHandlers[Command.NextStep] = cmd =>
+            RegisterCommandHandler(Command.NextStep, cmd =>
             {
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, string.Empty));
                 CmdNextStep();
-            };
+            });
 
-            _commandHandlers[Command.SetMode] = cmd =>
+            RegisterCommandHandler(Command.SetMode, cmd =>
             {
                 if (cmd.Params.TryGetValue("NewMode", out var modeStr) &&
                         Enum.TryParse<S88Mode>(modeStr, true, out var newMode))
@@ -276,12 +270,7 @@ namespace PCBasedController.S88
                 }
 
                 cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, $"模式切换失败，参数 NewMode 不对"));
-            };
-
-            _commandHandlers[Command.DownloadRecipe] = cmd =>
-            {
-                CmdDownloadRecipe(cmd);
-            };
+            });
         }
 
         // ==========================================
@@ -358,6 +347,9 @@ namespace PCBasedController.S88
         /// 存储切手动那一刻的物理快照，供 OnEnterAuto 比对
         /// </summary>
         protected Dictionary<string, string> _autoContextSnapshot = new();
+
+        protected void RegisterCommandHandler(Command cmdName, Action<InternalCommand> handler)
+        => _commandHandlers[cmdName] = handler;
 
         // 日志方法
         protected void LogInfo(string msg) => _logger.LogInformation("[{Name}] - {Msg}",Name,msg);
@@ -540,33 +532,6 @@ namespace PCBasedController.S88
                     _logger.LogWarning("指令 [{TargetUnit}.{TargetObject}.{CmdName}] 被系统强制清理，未执行", cmd.TargetUnit, cmd.TargetObject, cmd.CmdName);
                 }
             }
-        }
-        private void CmdDownloadRecipe(InternalCommand cmd)
-        {
-            if (Mode != S88Mode.Manual)
-            {
-                // 状态校验
-                if (State != S88State.Idle && State != S88State.Stopped && State != S88State.Aborted)
-                {
-                    var msg = $"当前状态 {State} 不允许下发配方。";
-                    cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, msg));
-                    return;
-                }
-
-                // 配方合法性校验
-                if (!OnValidateRecipe(cmd.JsonPayload, out string errorMsg))
-                {
-                    var msg = $"配方校验失败: {errorMsg}";
-                    cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Rejected, msg));
-                    return;
-                }
-            }
-
-            // 应用配方
-            OnApplyRecipe(cmd.JsonPayload);
-
-            // 通知UI
-            cmd.CallbackTcs?.TrySetResult(new CommandResult(CommandResultType.Accepted, "配方下载并校验成功！"));
         }
         private void ProcessCommandQueue()
         {

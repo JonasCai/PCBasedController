@@ -18,4 +18,8 @@
       <Link>gRPC\gRPCSharedData.proto</Link>
     </Protobuf>
   </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="02.EquipmentModule\" />
+  </ItemGroup>
 </Project>
